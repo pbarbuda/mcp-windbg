@@ -111,6 +111,7 @@ class GetWindbgOutputParams(BaseModel):
     dump_path: Optional[str] = Field(default=None, description="Path to the Windows crash dump file")
     connection_string: Optional[str] = Field(default=None, description="Remote connection string (e.g., 'tcp:Port=5005,Server=192.168.0.100')")
     clear: bool = Field(default=True, description="Whether to clear the output buffer after reading")
+    max_lines: int = Field(default=100, description="Maximum number of lines to return (returns most recent).")
 
     @model_validator(mode='after')
     def validate_connection_params(self):
@@ -592,9 +593,14 @@ def _create_server(
                         text="No recent output available."
                     )]
 
+                # Limit to max_lines (take most recent)
+                total_lines = len(output)
+                if args.max_lines and len(output) > args.max_lines:
+                    output = output[-args.max_lines:]
+
                 return [TextContent(
                     type="text",
-                    text=f"Recent debugger output ({len(output)} lines):\n```\n" + "\n".join(output) + "\n```"
+                    text=f"Recent debugger output ({len(output)} of {total_lines} lines):\n```\n" + "\n".join(output) + "\n```"
                 )]
 
             elif name == "break_windbg":
