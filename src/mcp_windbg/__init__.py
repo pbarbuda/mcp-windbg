@@ -13,7 +13,7 @@ def main():
     )
     parser.add_argument("--cdb-path", type=str, help="Custom path to cdb.exe")
     parser.add_argument("--symbols-path", type=str, help="Custom symbols path")
-    parser.add_argument("--timeout", type=int, default=30, help="Command timeout in seconds")
+    parser.add_argument("--timeout", type=int, default=240, help="Command timeout in seconds (default: 240)")
     parser.add_argument("--verbose", action="store_true", help="Enable verbose output")
     parser.add_argument("--log-file", type=str, help="Path to log file for debug output")
 

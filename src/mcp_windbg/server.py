@@ -133,7 +133,7 @@ def get_or_create_session(
     connection_string: Optional[str] = None,
     cdb_path: Optional[str] = None,
     symbols_path: Optional[str] = None,
-    timeout: int = 30,
+    timeout: int = 240,
     verbose: bool = False
 ) -> CDBSession:
     """Get an existing CDB session or create a new one."""
@@ -236,7 +236,7 @@ def execute_common_analysis_commands(session: CDBSession) -> dict:
 async def serve(
     cdb_path: Optional[str] = None,
     symbols_path: Optional[str] = None,
-    timeout: int = 30,
+    timeout: int = 240,
     verbose: bool = False,
 ) -> None:
     """Run the WinDbg MCP server with stdio transport.
@@ -244,7 +244,7 @@ async def serve(
     Args:
         cdb_path: Optional custom path to cdb.exe
         symbols_path: Optional custom symbols path
-        timeout: Command timeout in seconds
+        timeout: Command timeout in seconds (default: 240)
         verbose: Whether to enable verbose output
     """
     server = _create_server(cdb_path, symbols_path, timeout, verbose)
@@ -259,7 +259,7 @@ async def serve_http(
     port: int = 8000,
     cdb_path: Optional[str] = None,
     symbols_path: Optional[str] = None,
-    timeout: int = 30,
+    timeout: int = 240,
     verbose: bool = False,
 ) -> None:
     """Run the WinDbg MCP server with Streamable HTTP transport.
@@ -269,7 +269,7 @@ async def serve_http(
         port: Port to bind the HTTP server to
         cdb_path: Optional custom path to cdb.exe
         symbols_path: Optional custom symbols path
-        timeout: Command timeout in seconds
+        timeout: Command timeout in seconds (default: 240)
         verbose: Whether to enable verbose output
     """
     from starlette.applications import Starlette
@@ -314,7 +314,7 @@ async def serve_http(
 def _create_server(
     cdb_path: Optional[str] = None,
     symbols_path: Optional[str] = None,
-    timeout: int = 30,
+    timeout: int = 240,
     verbose: bool = False,
 ) -> Server:
     """Create and configure the MCP server with all tools and prompts.
@@ -322,7 +322,7 @@ def _create_server(
     Args:
         cdb_path: Optional custom path to cdb.exe
         symbols_path: Optional custom symbols path
-        timeout: Command timeout in seconds
+        timeout: Command timeout in seconds (default: 240)
         verbose: Whether to enable verbose output
 
     Returns:
