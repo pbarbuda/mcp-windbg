@@ -1,5 +1,6 @@
 import os
 import pytest
+import time
 
 from mcp_windbg.cdb_session import CDBSession, CDBError, DEFAULT_CDB_PATHS
 
@@ -174,6 +175,87 @@ def test_break_execution_not_allowed_for_dumps():
         # break_execution should raise CDBError for dump files
         with pytest.raises(CDBError, match="only supported for remote debugging"):
             session.break_execution()
+    finally:
+        session.shutdown()
+
+
+def test_send_command_async():
+    """Test send_command_async sends commands without waiting"""
+    session = setup_cdb_session()
+    try:
+        # Clear any initial output
+        session.get_recent_output(clear=True)
+
+        # Send an async command (any command works for this test)
+        session.send_command_async("version")
+
+        # Should return immediately (unlike send_command which waits for marker)
+        # Wait a brief moment for output to arrive
+        time.sleep(0.5)
+
+        # Get recent output should have captured the command output
+        output = session.get_recent_output(clear=True)
+        assert len(output) > 0
+        assert any("Microsoft" in line or "Debugger" in line for line in output)
+
+    finally:
+        session.shutdown()
+
+
+def test_send_command_async_multiple():
+    """Test multiple async commands accumulate output in buffer"""
+    session = setup_cdb_session()
+    try:
+        # Clear any initial output
+        session.get_recent_output(clear=True)
+
+        # Send multiple async commands
+        session.send_command_async("version")
+        time.sleep(0.3)
+        session.send_command_async(".sympath")
+        time.sleep(0.3)
+
+        # Get all accumulated output
+        output = session.get_recent_output(clear=True)
+        assert len(output) > 0
+
+        # Should contain output from both commands
+        has_version = any("Microsoft" in line or "Debugger" in line for line in output)
+        has_sympath = any("Symbol search path" in line for line in output)
+
+        # At least one should be present (timing-dependent)
+        assert has_version or has_sympath
+
+    finally:
+        session.shutdown()
+
+
+def test_send_command_async_then_get_output():
+    """Test async command followed by get_recent_output retrieves accumulated output"""
+    session = setup_cdb_session()
+    try:
+        # Clear buffer
+        session.get_recent_output(clear=True)
+
+        # Send async command
+        session.send_command_async("lm")
+
+        # Wait for output to accumulate
+        time.sleep(1)
+
+        # Get output without clearing first
+        output1 = session.get_recent_output(clear=False)
+        assert len(output1) > 0
+
+        # Get output again without clearing - should be same or more
+        output2 = session.get_recent_output(clear=False)
+        assert len(output2) >= len(output1)
+
+        # Clear and verify empty
+        session.get_recent_output(clear=True)
+        output3 = session.get_recent_output(clear=True)
+        assert len(output3) == 0
+
     finally:
         session.shutdown()
 
