@@ -2,6 +2,7 @@ import subprocess
 import threading
 import re
 import os
+import sys
 import platform
 import logging
 from typing import List, Optional
@@ -169,7 +170,7 @@ class CDBSession:
             for line in self.process.stdout:
                 line = line.rstrip()
                 if self.verbose:
-                    print(f"CDB > {line}")
+                    print(f"CDB > {line}", file=sys.stderr)
 
                 with self.lock:
                     buffer.append(line)
@@ -197,7 +198,7 @@ class CDBSession:
                                 buffer.pop()
         except (IOError, ValueError) as e:
             if self.verbose:
-                print(f"CDB output reader error: {e}")
+                print(f"CDB output reader error: {e}", file=sys.stderr)
 
     def _wait_for_prompt(self, timeout=None):
         """Wait for CDB to be ready for commands by sending a marker"""
@@ -348,7 +349,7 @@ class CDBSession:
                     self.process.wait(timeout=3)
         except Exception as e:
             if self.verbose:
-                print(f"Error during shutdown: {e}")
+                print(f"Error during shutdown: {e}", file=sys.stderr)
         finally:
             self.process = None
 

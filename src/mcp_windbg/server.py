@@ -503,14 +503,11 @@ def _create_server(
 
             elif name == "run_windbg_cmd":
                 args = RunWindbgCmdParams(**arguments)
-                logger.info(f"run_windbg_cmd: command='{args.command}', dump_path='{args.dump_path}', connection_string='{args.connection_string}'")
                 session = get_or_create_session(
                     dump_path=args.dump_path, connection_string=args.connection_string,
                     cdb_path=cdb_path, symbols_path=symbols_path, timeout=timeout, verbose=verbose
                 )
-                logger.info(f"run_windbg_cmd: Got session, sending command...")
                 output = session.send_command(args.command)
-                logger.info(f"run_windbg_cmd: Command completed, got {len(output)} lines")
 
                 return [TextContent(
                     type="text",
