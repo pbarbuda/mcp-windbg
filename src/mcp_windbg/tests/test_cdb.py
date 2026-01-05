@@ -115,5 +115,68 @@ def test_thread_context():
     finally:
         session.shutdown()
 
+
+def test_get_recent_output():
+    """Test get_recent_output captures command output"""
+    session = setup_cdb_session()
+    try:
+        # Clear any initial output
+        session.get_recent_output(clear=True)
+
+        # Run some commands
+        session.send_command("version")
+        session.send_command("r")
+
+        # Get recent output - should contain output from both commands
+        output = session.get_recent_output(clear=True)
+        assert len(output) > 0
+        # Should contain version info
+        assert any("Microsoft" in line or "Debugger" in line for line in output)
+
+        # After clearing, should be empty
+        output_after_clear = session.get_recent_output(clear=True)
+        assert len(output_after_clear) == 0
+    finally:
+        session.shutdown()
+
+
+def test_get_recent_output_no_clear():
+    """Test get_recent_output with clear=False preserves buffer"""
+    session = setup_cdb_session()
+    try:
+        # Clear any initial output
+        session.get_recent_output(clear=True)
+
+        # Run a command
+        session.send_command("version")
+
+        # Get output without clearing
+        output1 = session.get_recent_output(clear=False)
+        assert len(output1) > 0
+
+        # Get output again - should still have the same content
+        output2 = session.get_recent_output(clear=False)
+        assert len(output2) > 0
+        assert len(output2) >= len(output1)
+
+        # Now clear and verify empty
+        session.get_recent_output(clear=True)
+        output3 = session.get_recent_output(clear=True)
+        assert len(output3) == 0
+    finally:
+        session.shutdown()
+
+
+def test_break_execution_not_allowed_for_dumps():
+    """Test that break_execution raises error for dump files"""
+    session = setup_cdb_session()
+    try:
+        # break_execution should raise CDBError for dump files
+        with pytest.raises(CDBError, match="only supported for remote debugging"):
+            session.break_execution()
+    finally:
+        session.shutdown()
+
+
 if __name__ == "__main__":
     pytest.main(["-v", __file__])

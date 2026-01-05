@@ -4,6 +4,10 @@ import re
 import os
 import platform
 from typing import List, Optional
+from collections import deque
+
+# Maximum number of lines to keep in the recent output buffer
+MAX_RECENT_OUTPUT_LINES = 1000
 
 # Regular expression to detect CDB prompts
 PROMPT_REGEX = re.compile(r"^\d+:\d+>\s*$")
@@ -109,6 +113,7 @@ class CDBSession:
             raise CDBError(f"Failed to start CDB process: {str(e)}")
 
         self.output_lines = []
+        self.recent_output = deque(maxlen=MAX_RECENT_OUTPUT_LINES)
         self.lock = threading.Lock()
         self.ready_event = threading.Event()
         self.reader_thread = threading.Thread(target=self._read_output)
@@ -152,6 +157,9 @@ class CDBSession:
 
                 with self.lock:
                     buffer.append(line)
+                    # Always append to recent_output (except marker lines)
+                    if not COMMAND_MARKER_PATTERN.search(line):
+                        self.recent_output.append(line)
                     # Check if the marker is in this line
                     if COMMAND_MARKER_PATTERN.search(line):
                         # Remove the marker line itself
@@ -212,6 +220,54 @@ class CDBSession:
             result = self.output_lines.copy()
             self.output_lines = []
         return result
+
+    def get_recent_output(self, clear: bool = True) -> List[str]:
+        """
+        Get the recent output from the debugger.
+
+        This returns all output that has been captured since the session started
+        or since the last call to get_recent_output (if clear=True). This is useful
+        for capturing output that occurs asynchronously, such as debug prints
+        when the target is running.
+
+        Args:
+            clear: Whether to clear the buffer after reading (default True)
+
+        Returns:
+            List of output lines from the debugger
+        """
+        with self.lock:
+            result = list(self.recent_output)
+            if clear:
+                self.recent_output.clear()
+        return result
+
+    def break_execution(self) -> bool:
+        """
+        Break into the debugger by sending Ctrl+C.
+
+        This is primarily useful for remote debugging sessions where the target
+        may be running. For crash dumps, the debugger is always in a stopped state.
+
+        Returns:
+            True if the break signal was sent successfully
+
+        Raises:
+            CDBError: If the process is not running or communication fails
+        """
+        if not self.process or self.process.poll() is not None:
+            raise CDBError("CDB process is not running")
+
+        if not self.remote_connection:
+            raise CDBError("Break is only supported for remote debugging sessions")
+
+        try:
+            # Send Ctrl+C (0x03) to break into the debugger
+            self.process.stdin.write("\x03")
+            self.process.stdin.flush()
+            return True
+        except IOError as e:
+            raise CDBError(f"Failed to send break signal: {str(e)}")
 
     def shutdown(self):
         """Clean up and terminate the CDB process"""

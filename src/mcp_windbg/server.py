@@ -106,6 +106,27 @@ class ListWindbgDumpsParams(BaseModel):
     )
 
 
+class GetWindbgOutputParams(BaseModel):
+    """Parameters for getting recent debugger output."""
+    dump_path: Optional[str] = Field(default=None, description="Path to the Windows crash dump file")
+    connection_string: Optional[str] = Field(default=None, description="Remote connection string (e.g., 'tcp:Port=5005,Server=192.168.0.100')")
+    clear: bool = Field(default=True, description="Whether to clear the output buffer after reading")
+
+    @model_validator(mode='after')
+    def validate_connection_params(self):
+        """Validate that exactly one of dump_path or connection_string is provided."""
+        if not self.dump_path and not self.connection_string:
+            raise ValueError("Either dump_path or connection_string must be provided")
+        if self.dump_path and self.connection_string:
+            raise ValueError("dump_path and connection_string are mutually exclusive")
+        return self
+
+
+class BreakWindbgParams(BaseModel):
+    """Parameters for breaking into the debugger."""
+    connection_string: str = Field(description="Remote connection string (e.g., 'tcp:Port=5005,Server=192.168.0.100')")
+
+
 def get_or_create_session(
     dump_path: Optional[str] = None,
     connection_string: Optional[str] = None,
@@ -338,6 +359,25 @@ def _create_server(
                 This tool helps you discover available crash dumps that can be analyzed.
                 """,
                 inputSchema=ListWindbgDumpsParams.model_json_schema(),
+            ),
+            Tool(
+                name="get_windbg_output",
+                description="""
+                Get recent output from the debugger session.
+                This returns all output that has been captured since the session started
+                or since the last call to this tool. Useful for capturing asynchronous output
+                such as debug prints when the target is running after a 'g' command.
+                """,
+                inputSchema=GetWindbgOutputParams.model_json_schema(),
+            ),
+            Tool(
+                name="break_windbg",
+                description="""
+                Break into the debugger for a remote debugging session.
+                This sends a break signal (Ctrl+C) to interrupt execution of the target.
+                Only works for remote debugging sessions, not crash dumps.
+                """,
+                inputSchema=BreakWindbgParams.model_json_schema(),
             )
         ]
 
@@ -527,6 +567,58 @@ def _create_server(
                     type="text",
                     text=result_text
                 )]
+
+            elif name == "get_windbg_output":
+                args = GetWindbgOutputParams(**arguments)
+
+                # Get the session identifier
+                if args.dump_path:
+                    session_id = os.path.abspath(args.dump_path)
+                else:
+                    session_id = f"remote:{args.connection_string}"
+
+                if session_id not in active_sessions or active_sessions[session_id] is None:
+                    return [TextContent(
+                        type="text",
+                        text=f"No active session found. Please open a dump or connect to a remote session first."
+                    )]
+
+                session = active_sessions[session_id]
+                output = session.get_recent_output(clear=args.clear)
+
+                if not output:
+                    return [TextContent(
+                        type="text",
+                        text="No recent output available."
+                    )]
+
+                return [TextContent(
+                    type="text",
+                    text=f"Recent debugger output ({len(output)} lines):\n```\n" + "\n".join(output) + "\n```"
+                )]
+
+            elif name == "break_windbg":
+                args = BreakWindbgParams(**arguments)
+                session_id = f"remote:{args.connection_string}"
+
+                if session_id not in active_sessions or active_sessions[session_id] is None:
+                    return [TextContent(
+                        type="text",
+                        text=f"No active remote session found for: {args.connection_string}"
+                    )]
+
+                session = active_sessions[session_id]
+                try:
+                    session.break_execution()
+                    return [TextContent(
+                        type="text",
+                        text=f"Break signal sent to remote session: {args.connection_string}\nThe target should now be stopped. Use run_windbg_cmd to inspect state."
+                    )]
+                except CDBError as e:
+                    return [TextContent(
+                        type="text",
+                        text=f"Failed to break into debugger: {str(e)}"
+                    )]
 
             raise McpError(ErrorData(
                 code=INVALID_PARAMS,
