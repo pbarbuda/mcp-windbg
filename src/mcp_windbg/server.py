@@ -73,6 +73,10 @@ class RunWindbgCmdParams(BaseModel):
     dump_path: Optional[str] = Field(default=None, description="Path to the Windows crash dump file")
     connection_string: Optional[str] = Field(default=None, description="Remote connection string (e.g., 'tcp:Port=5005,Server=192.168.0.100')")
     command: str = Field(description="WinDbg command to execute")
+    async_mode: bool = Field(
+        default=False,
+        description="If true, send the command without waiting for completion. Useful for commands like 'g' (go/continue) that don't return until the debugger breaks. The tool will wait 3 seconds and return any output captured during that time. Use get_windbg_output to retrieve additional output later."
+    )
 
     @model_validator(mode='after')
     def validate_connection_params(self):
@@ -354,6 +358,11 @@ def _create_server(
                 description="""
                 Execute a specific WinDbg command on a loaded crash dump or remote session.
                 This tool allows you to run any WinDbg command and get the output.
+
+                For commands like 'g' (go/continue) that don't return until the debugger breaks,
+                set async_mode=true. This will send the command, wait 3 seconds, and return any
+                output captured during that time. Use get_windbg_output to retrieve additional
+                output later, or break_windbg to stop execution.
                 """,
                 inputSchema=RunWindbgCmdParams.model_json_schema(),
             ),
@@ -507,12 +516,29 @@ def _create_server(
                     dump_path=args.dump_path, connection_string=args.connection_string,
                     cdb_path=cdb_path, symbols_path=symbols_path, timeout=timeout, verbose=verbose
                 )
-                output = session.send_command(args.command)
 
-                return [TextContent(
-                    type="text",
-                    text=f"Command: {args.command}\n\nOutput:\n```\n" + "\n".join(output) + "\n```"
-                )]
+                if args.async_mode:
+                    # Send command without waiting for completion
+                    # Useful for 'g' and other commands that don't return until break
+                    import time
+                    session.send_command_async(args.command)
+                    time.sleep(3)  # Wait 3 seconds to capture initial output
+                    output = session.get_recent_output(clear=True)
+
+                    return [TextContent(
+                        type="text",
+                        text=f"Command: {args.command} (async mode - captured 3 seconds of output)\n\n"
+                             f"The command was sent without waiting for completion. "
+                             f"Use 'get_windbg_output' to retrieve additional output, or 'break_windbg' to stop execution.\n\n"
+                             f"Output:\n```\n" + "\n".join(output) + "\n```"
+                    )]
+                else:
+                    output = session.send_command(args.command)
+
+                    return [TextContent(
+                        type="text",
+                        text=f"Command: {args.command}\n\nOutput:\n```\n" + "\n".join(output) + "\n```"
+                    )]
 
             elif name == "close_windbg_dump":
                 args = CloseWindbgDumpParams(**arguments)
