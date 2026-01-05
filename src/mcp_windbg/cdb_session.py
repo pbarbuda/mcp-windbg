@@ -99,7 +99,10 @@ class CDBSession:
         if self.dump_path:
             cmd_args.extend(["-z", self.dump_path])
         elif self.remote_connection:
-            cmd_args.extend(["-remote", self.remote_connection])
+            # -clines 0 prevents CDB from retrieving the entire session history
+            # from the remote, which can take minutes for long-running sessions.
+            # The agent can use get_recent_output to retrieve output as needed.
+            cmd_args.extend(["-remote", self.remote_connection, "-clines", "0"])
 
         # Add symbols path if provided
         if symbols_path:
@@ -129,17 +132,39 @@ class CDBSession:
         self.lock = threading.Lock()
         self.ready_event = threading.Event()
         self.expected_marker_id: Optional[str] = None  # The marker ID we're waiting for
-        self.command_counter = 0  # Counter for unique marker IDs
+
+        # Use a unique session ID to avoid marker collisions with other sessions
+        # or stale markers from previous connections to the same remote
+        self.session_id = uuid.uuid4().hex[:8]
+        self.command_counter = 0  # Counter for unique marker IDs within this session
+
         self.reader_thread = threading.Thread(target=self._read_output)
         self.reader_thread.daemon = True
         self.reader_thread.start()
 
         # Wait for CDB to initialize by sending an echo marker
+        # For remote connections, use a longer timeout since there can be
+        # extensive symbol path validation output
+        init_timeout = self.timeout
+        if self.remote_connection:
+            # Remote connections can take much longer due to symbol validation
+            init_timeout = max(self.timeout, 60)
+            logger.info(f"Remote connection detected, using {init_timeout}s init timeout")
+
         try:
-            self._wait_for_prompt(timeout=self.timeout)
+            self._wait_for_prompt(timeout=init_timeout)
         except CDBError:
             self.shutdown()
             raise CDBError("CDB initialization timed out")
+
+        # For remote connections, clear any accumulated output from the connection
+        # process (symbol validation, path errors, etc.) so it doesn't pollute
+        # the first command's output
+        if self.remote_connection:
+            with self.lock:
+                self.recent_output.clear()
+                self.output_lines = []
+            logger.info("Cleared initial remote connection output")
 
         # Run initial commands if provided
         if initial_commands:
@@ -286,6 +311,47 @@ class CDBSession:
 
         logger.debug(f"[{timestamp}] Command completed, got {len(result)} lines of output (marker={marker_id})")
         return result
+
+    def send_command_async(self, command: str) -> None:
+        """
+        Send a command to CDB without waiting for completion.
+
+        This is useful for commands like 'g' (go/continue) that don't return
+        until the debugger breaks again. The output can be retrieved later
+        using get_recent_output().
+
+        Args:
+            command: The command to send
+
+        Raises:
+            CDBError: If CDB is not running or communication fails
+        """
+        if not self.process:
+            logger.error("send_command_async called but CDB process is not running")
+            raise CDBError("CDB process is not running")
+
+        # Check if process is still alive
+        poll_result = self.process.poll()
+        if poll_result is not None:
+            logger.error(f"CDB process has terminated with exit code: {poll_result}")
+            raise CDBError(f"CDB process has terminated (exit code: {poll_result})")
+
+        timestamp = datetime.now().isoformat()
+        logger.debug(f"[{timestamp}] send_command_async: '{command}'")
+
+        # Clear any pending marker expectation since we're not waiting
+        with self.lock:
+            self.expected_marker_id = None
+
+        try:
+            # Send just the command, no marker - we don't expect it to complete
+            logger.debug(f"[{timestamp}] Writing async command to stdin...")
+            self.process.stdin.write(f"{command}\n")
+            self.process.stdin.flush()
+            logger.debug(f"[{timestamp}] Async command written and flushed")
+        except IOError as e:
+            logger.error(f"[{timestamp}] Failed to send async command: {str(e)}")
+            raise CDBError(f"Failed to send command: {str(e)}")
 
     def get_recent_output(self, clear: bool = True) -> List[str]:
         """
