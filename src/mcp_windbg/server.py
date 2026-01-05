@@ -148,7 +148,11 @@ def get_or_create_session(
     else:
         session_id = f"remote:{connection_string}"
 
+    logger.info(f"get_or_create_session: session_id='{session_id}'")
+    logger.info(f"  Active sessions: {list(active_sessions.keys())}")
+
     if session_id not in active_sessions or active_sessions[session_id] is None:
+        logger.info(f"  Creating NEW session for: {session_id}")
         try:
             session = CDBSession(
                 dump_path=dump_path,
@@ -159,12 +163,28 @@ def get_or_create_session(
                 verbose=verbose
             )
             active_sessions[session_id] = session
+            logger.info(f"  Session created successfully (PID: {session.process.pid if session.process else 'N/A'})")
             return session
         except Exception as e:
+            logger.error(f"  Failed to create session: {str(e)}")
             raise McpError(ErrorData(
                 code=INTERNAL_ERROR,
                 message=f"Failed to create CDB session: {str(e)}"
             ))
+    else:
+        existing_session = active_sessions[session_id]
+        # Check if the existing session is still alive
+        if existing_session.process and existing_session.process.poll() is None:
+            logger.info(f"  REUSING existing session (PID: {existing_session.process.pid})")
+        else:
+            logger.warning(f"  Existing session is DEAD, creating new one")
+            # Remove the dead session and create a new one
+            try:
+                existing_session.shutdown()
+            except Exception:
+                pass
+            del active_sessions[session_id]
+            return get_or_create_session(dump_path, connection_string, cdb_path, symbols_path, timeout, verbose)
 
     return active_sessions[session_id]
 
@@ -384,6 +404,7 @@ def _create_server(
 
     @server.call_tool()
     async def call_tool(name, arguments: dict) -> list[TextContent]:
+        logger.info(f"call_tool: name='{name}', arguments={arguments}")
         try:
             if name == "open_windbg_dump":
                 # Check if dump_path is missing or empty
@@ -482,11 +503,14 @@ def _create_server(
 
             elif name == "run_windbg_cmd":
                 args = RunWindbgCmdParams(**arguments)
+                logger.info(f"run_windbg_cmd: command='{args.command}', dump_path='{args.dump_path}', connection_string='{args.connection_string}'")
                 session = get_or_create_session(
                     dump_path=args.dump_path, connection_string=args.connection_string,
                     cdb_path=cdb_path, symbols_path=symbols_path, timeout=timeout, verbose=verbose
                 )
+                logger.info(f"run_windbg_cmd: Got session, sending command...")
                 output = session.send_command(args.command)
+                logger.info(f"run_windbg_cmd: Command completed, got {len(output)} lines")
 
                 return [TextContent(
                     type="text",

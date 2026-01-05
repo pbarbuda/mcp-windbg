@@ -3,8 +3,13 @@ import threading
 import re
 import os
 import platform
+import logging
 from typing import List, Optional
 from collections import deque
+from datetime import datetime
+
+# Set up module logger
+logger = logging.getLogger(__name__)
 
 # Maximum number of lines to keep in the recent output buffer
 MAX_RECENT_OUTPUT_LINES = 1000
@@ -101,6 +106,7 @@ class CDBSession:
             cmd_args.extend(additional_args)
 
         try:
+            logger.info(f"Starting CDB process with args: {cmd_args}")
             self.process = subprocess.Popen(
                 cmd_args,
                 stdin=subprocess.PIPE,
@@ -109,7 +115,9 @@ class CDBSession:
                 text=True,
                 bufsize=1
             )
+            logger.info(f"CDB process started with PID: {self.process.pid}")
         except Exception as e:
+            logger.error(f"Failed to start CDB process: {str(e)}")
             raise CDBError(f"Failed to start CDB process: {str(e)}")
 
         self.output_lines = []
@@ -199,7 +207,18 @@ class CDBSession:
             CDBError: If the command times out or CDB is not responsive
         """
         if not self.process:
+            logger.error("send_command called but CDB process is not running")
             raise CDBError("CDB process is not running")
+
+        # Check if process is still alive
+        poll_result = self.process.poll()
+        if poll_result is not None:
+            logger.error(f"CDB process has terminated with exit code: {poll_result}")
+            raise CDBError(f"CDB process has terminated (exit code: {poll_result})")
+
+        cmd_timeout = timeout or self.timeout
+        timestamp = datetime.now().isoformat()
+        logger.debug(f"[{timestamp}] send_command: '{command}' (timeout={cmd_timeout}s)")
 
         self.ready_event.clear()
         with self.lock:
@@ -207,18 +226,24 @@ class CDBSession:
 
         try:
             # Send the command followed by our marker to detect completion
+            logger.debug(f"[{timestamp}] Writing command to stdin...")
             self.process.stdin.write(f"{command}\n{COMMAND_MARKER}\n")
             self.process.stdin.flush()
+            logger.debug(f"[{timestamp}] Command written and flushed")
         except IOError as e:
+            logger.error(f"[{timestamp}] Failed to send command: {str(e)}")
             raise CDBError(f"Failed to send command: {str(e)}")
 
-        cmd_timeout = timeout or self.timeout
+        logger.debug(f"[{timestamp}] Waiting for ready_event (timeout={cmd_timeout}s)...")
         if not self.ready_event.wait(timeout=cmd_timeout):
+            logger.error(f"[{timestamp}] Command timed out after {cmd_timeout} seconds: {command}")
             raise CDBError(f"Command timed out after {cmd_timeout} seconds: {command}")
 
         with self.lock:
             result = self.output_lines.copy()
             self.output_lines = []
+
+        logger.debug(f"[{timestamp}] Command completed, got {len(result)} lines of output")
         return result
 
     def get_recent_output(self, clear: bool = True) -> List[str]:
