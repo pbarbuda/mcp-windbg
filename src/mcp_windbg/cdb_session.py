@@ -18,8 +18,9 @@ MAX_RECENT_OUTPUT_LINES = 1000
 PROMPT_REGEX = re.compile(r"^\d+:\d+>\s*$")
 
 # Command marker to reliably detect command completion
-COMMAND_MARKER = ".echo COMMAND_COMPLETED_MARKER"
-COMMAND_MARKER_PATTERN = re.compile(r"COMMAND_COMPLETED_MARKER")
+# We use a unique ID per command to avoid stale marker issues
+COMMAND_MARKER_PREFIX = "CMDMARKER_"
+COMMAND_MARKER_PATTERN = re.compile(r"CMDMARKER_([a-f0-9]+)")
 
 # Default paths where cdb.exe might be located
 DEFAULT_CDB_PATHS = [
@@ -124,6 +125,8 @@ class CDBSession:
         self.recent_output = deque(maxlen=MAX_RECENT_OUTPUT_LINES)
         self.lock = threading.Lock()
         self.ready_event = threading.Event()
+        self.expected_marker_id: Optional[str] = None  # The marker ID we're waiting for
+        self.command_counter = 0  # Counter for unique marker IDs
         self.reader_thread = threading.Thread(target=self._read_output)
         self.reader_thread.daemon = True
         self.reader_thread.start()
@@ -151,6 +154,11 @@ class CDBSession:
 
         return None
 
+    def _generate_marker_id(self) -> str:
+        """Generate a unique marker ID for a command."""
+        self.command_counter += 1
+        return f"{self.command_counter:08x}"
+
     def _read_output(self):
         """Thread function to continuously read CDB output"""
         if not self.process or not self.process.stdout:
@@ -169,13 +177,24 @@ class CDBSession:
                     if not COMMAND_MARKER_PATTERN.search(line):
                         self.recent_output.append(line)
                     # Check if the marker is in this line
-                    if COMMAND_MARKER_PATTERN.search(line):
-                        # Remove the marker line itself
-                        if buffer and COMMAND_MARKER_PATTERN.search(buffer[-1]):
-                            buffer.pop()
-                        self.output_lines = buffer
-                        buffer = []
-                        self.ready_event.set()
+                    marker_match = COMMAND_MARKER_PATTERN.search(line)
+                    if marker_match:
+                        marker_id = marker_match.group(1)
+                        # Only trigger if this is the marker we're waiting for
+                        if self.expected_marker_id and marker_id == self.expected_marker_id:
+                            logger.debug(f"Received expected marker: {marker_id}")
+                            # Remove the marker line itself
+                            if buffer and COMMAND_MARKER_PATTERN.search(buffer[-1]):
+                                buffer.pop()
+                            self.output_lines = buffer
+                            buffer = []
+                            self.expected_marker_id = None
+                            self.ready_event.set()
+                        else:
+                            logger.debug(f"Ignoring stale marker: {marker_id} (expected: {self.expected_marker_id})")
+                            # Remove marker line from buffer but don't signal
+                            if buffer and COMMAND_MARKER_PATTERN.search(buffer[-1]):
+                                buffer.pop()
         except (IOError, ValueError) as e:
             if self.verbose:
                 print(f"CDB output reader error: {e}")
@@ -183,12 +202,21 @@ class CDBSession:
     def _wait_for_prompt(self, timeout=None):
         """Wait for CDB to be ready for commands by sending a marker"""
         try:
+            marker_id = self._generate_marker_id()
+            marker_cmd = f".echo {COMMAND_MARKER_PREFIX}{marker_id}"
+            logger.debug(f"_wait_for_prompt: sending marker {marker_id}")
+
             self.ready_event.clear()
-            self.process.stdin.write(f"{COMMAND_MARKER}\n")
+            with self.lock:
+                self.expected_marker_id = marker_id
+                self.output_lines = []
+
+            self.process.stdin.write(f"{marker_cmd}\n")
             self.process.stdin.flush()
 
             if not self.ready_event.wait(timeout=timeout or self.timeout):
                 raise CDBError(f"Timed out waiting for CDB prompt")
+            logger.debug(f"_wait_for_prompt: marker {marker_id} received")
         except IOError as e:
             raise CDBError(f"Failed to communicate with CDB: {str(e)}")
 
@@ -218,32 +246,36 @@ class CDBSession:
 
         cmd_timeout = timeout or self.timeout
         timestamp = datetime.now().isoformat()
-        logger.debug(f"[{timestamp}] send_command: '{command}' (timeout={cmd_timeout}s)")
+        marker_id = self._generate_marker_id()
+        marker_cmd = f".echo {COMMAND_MARKER_PREFIX}{marker_id}"
+
+        logger.debug(f"[{timestamp}] send_command: '{command}' (timeout={cmd_timeout}s, marker={marker_id})")
 
         self.ready_event.clear()
         with self.lock:
+            self.expected_marker_id = marker_id
             self.output_lines = []
 
         try:
-            # Send the command followed by our marker to detect completion
+            # Send the command followed by our unique marker to detect completion
             logger.debug(f"[{timestamp}] Writing command to stdin...")
-            self.process.stdin.write(f"{command}\n{COMMAND_MARKER}\n")
+            self.process.stdin.write(f"{command}\n{marker_cmd}\n")
             self.process.stdin.flush()
-            logger.debug(f"[{timestamp}] Command written and flushed")
+            logger.debug(f"[{timestamp}] Command written and flushed (marker={marker_id})")
         except IOError as e:
             logger.error(f"[{timestamp}] Failed to send command: {str(e)}")
             raise CDBError(f"Failed to send command: {str(e)}")
 
-        logger.debug(f"[{timestamp}] Waiting for ready_event (timeout={cmd_timeout}s)...")
+        logger.debug(f"[{timestamp}] Waiting for ready_event (timeout={cmd_timeout}s, marker={marker_id})...")
         if not self.ready_event.wait(timeout=cmd_timeout):
-            logger.error(f"[{timestamp}] Command timed out after {cmd_timeout} seconds: {command}")
+            logger.error(f"[{timestamp}] Command timed out after {cmd_timeout} seconds: {command} (marker={marker_id})")
             raise CDBError(f"Command timed out after {cmd_timeout} seconds: {command}")
 
         with self.lock:
             result = self.output_lines.copy()
             self.output_lines = []
 
-        logger.debug(f"[{timestamp}] Command completed, got {len(result)} lines of output")
+        logger.debug(f"[{timestamp}] Command completed, got {len(result)} lines of output (marker={marker_id})")
         return result
 
     def get_recent_output(self, clear: bool = True) -> List[str]:
