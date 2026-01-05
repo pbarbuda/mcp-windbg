@@ -5,6 +5,7 @@ import os
 import sys
 import platform
 import logging
+import uuid
 from typing import List, Optional
 from collections import deque
 from datetime import datetime
@@ -20,8 +21,9 @@ PROMPT_REGEX = re.compile(r"^\d+:\d+>\s*$")
 
 # Command marker to reliably detect command completion
 # We use a unique ID per command to avoid stale marker issues
+# Format: CMDMARKER_<session_id>_<counter> (e.g., CMDMARKER_a1b2c3d4_0001)
 COMMAND_MARKER_PREFIX = "CMDMARKER_"
-COMMAND_MARKER_PATTERN = re.compile(r"CMDMARKER_([a-f0-9]+)")
+COMMAND_MARKER_PATTERN = re.compile(r"CMDMARKER_([a-f0-9]+_[a-f0-9]+)")
 
 # Default paths where cdb.exe might be located
 DEFAULT_CDB_PATHS = [
@@ -156,9 +158,15 @@ class CDBSession:
         return None
 
     def _generate_marker_id(self) -> str:
-        """Generate a unique marker ID for a command."""
+        """
+        Generate a unique marker ID for a command.
+
+        Uses a combination of session UUID and counter to ensure markers
+        are globally unique and won't collide with markers from other
+        sessions or stale markers in the remote debugger's output buffer.
+        """
         self.command_counter += 1
-        return f"{self.command_counter:08x}"
+        return f"{self.session_id}_{self.command_counter:04x}"
 
     def _read_output(self):
         """Thread function to continuously read CDB output"""
