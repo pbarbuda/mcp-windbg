@@ -130,9 +130,21 @@ def get_or_create_session(
     cdb_path: Optional[str] = None,
     symbols_path: Optional[str] = None,
     timeout: int = 240,
-    verbose: bool = False
+    verbose: bool = False,
+    skip_initial_wait: bool = False
 ) -> CDBSession:
-    """Get an existing CDB session or create a new one."""
+    """Get an existing CDB session or create a new one.
+
+    Args:
+        dump_path: Path to dump file (mutually exclusive with connection_string)
+        connection_string: Remote connection string (mutually exclusive with dump_path)
+        cdb_path: Custom path to cdb.exe
+        symbols_path: Custom symbols path
+        timeout: Command timeout in seconds
+        verbose: Enable verbose output
+        skip_initial_wait: If True, don't wait for CDB prompt during initialization.
+                          Useful for connecting to running targets.
+    """
     if not dump_path and not connection_string:
         raise ValueError("Either dump_path or connection_string must be provided")
     if dump_path and connection_string:
@@ -144,7 +156,7 @@ def get_or_create_session(
     else:
         session_id = f"remote:{connection_string}"
 
-    logger.info(f"get_or_create_session: session_id='{session_id}'")
+    logger.info(f"get_or_create_session: session_id='{session_id}', skip_initial_wait={skip_initial_wait}")
     logger.info(f"  Active sessions: {list(active_sessions.keys())}")
 
     if session_id not in active_sessions or active_sessions[session_id] is None:
@@ -156,7 +168,8 @@ def get_or_create_session(
                 cdb_path=cdb_path,
                 symbols_path=symbols_path,
                 timeout=timeout,
-                verbose=verbose
+                verbose=verbose,
+                skip_initial_wait=skip_initial_wait
             )
             active_sessions[session_id] = session
             logger.info(f"  Session created successfully (PID: {session.process.pid if session.process else 'N/A'})")
@@ -180,7 +193,7 @@ def get_or_create_session(
             except Exception:
                 pass
             del active_sessions[session_id]
-            return get_or_create_session(dump_path, connection_string, cdb_path, symbols_path, timeout, verbose)
+            return get_or_create_session(dump_path, connection_string, cdb_path, symbols_path, timeout, verbose, skip_initial_wait)
 
     return active_sessions[session_id]
 
@@ -342,18 +355,18 @@ def _create_server(
                 description="""
                 Execute a specific WinDbg command on a loaded crash dump or remote session.
                 This tool allows you to run any WinDbg command and get the output.
-                
+
                 For remote debugging: Simply provide a connection_string and the session will be
                 created automatically on the first command. No separate 'open' step is needed.
                 Example connection strings:
                 - tcp:Port=5005,Server=192.168.0.100
                 - npipe:Pipe=pipename,Server=hostname
-                
+
                 For commands like 'g' (go/continue) that don't return until the debugger breaks,
                 set async_mode=true. This will send the command, wait 3 seconds, and return any
                 output captured during that time. Use get_windbg_output to retrieve additional
                 output later, or break_windbg to stop execution.
-                
+
                 Note: For remote sessions where the target may be running, use async_mode=true
                 for the first command, or use break_windbg first to ensure the target is stopped.
                 """,
@@ -390,6 +403,10 @@ def _create_server(
                 This returns all output that has been captured since the session started
                 or since the last call to this tool. Useful for capturing asynchronous output
                 such as debug prints when the target is running after a 'g' command.
+
+                This tool will automatically connect to a remote session if one doesn't exist,
+                without waiting for the target to break. Use this as a safe way to connect to
+                potentially running targets and see what output has accumulated.
                 """,
                 inputSchema=GetWindbgOutputParams.model_json_schema(),
             ),
@@ -399,6 +416,9 @@ def _create_server(
                 Break into the debugger for a remote debugging session.
                 This sends a break signal (Ctrl+C) to interrupt execution of the target.
                 Only works for remote debugging sessions, not crash dumps.
+
+                This tool will automatically connect to the remote session if one doesn't exist.
+                Use this as the recommended first step when connecting to a target that may be running.
                 """,
                 inputSchema=BreakWindbgParams.model_json_schema(),
             )
@@ -584,19 +604,34 @@ def _create_server(
                 else:
                     session_id = f"remote:{args.connection_string}"
 
+                # Auto-create session if it doesn't exist, using skip_initial_wait
+                # so we don't block on potentially running targets
                 if session_id not in active_sessions or active_sessions[session_id] is None:
-                    return [TextContent(
-                        type="text",
-                        text=f"No active session found. Please open a dump or connect to a remote session first."
-                    )]
+                    logger.info(f"get_windbg_output: Auto-creating session for {session_id}")
+                    try:
+                        session = get_or_create_session(
+                            dump_path=args.dump_path,
+                            connection_string=args.connection_string,
+                            cdb_path=cdb_path,
+                            symbols_path=symbols_path,
+                            timeout=timeout,
+                            verbose=verbose,
+                            skip_initial_wait=True  # Don't wait for prompt - target might be running
+                        )
+                    except Exception as e:
+                        return [TextContent(
+                            type="text",
+                            text=f"Failed to connect: {str(e)}"
+                        )]
+                else:
+                    session = active_sessions[session_id]
 
-                session = active_sessions[session_id]
                 output = session.get_recent_output(clear=args.clear)
 
                 if not output:
                     return [TextContent(
                         type="text",
-                        text="No recent output available."
+                        text="No recent output available. The target may be running silently, or this is a new connection."
                     )]
 
                 # Limit to max_lines (take most recent)
@@ -613,13 +648,26 @@ def _create_server(
                 args = BreakWindbgParams(**arguments)
                 session_id = f"remote:{args.connection_string}"
 
+                # Auto-create session if it doesn't exist
                 if session_id not in active_sessions or active_sessions[session_id] is None:
-                    return [TextContent(
-                        type="text",
-                        text=f"No active remote session found for: {args.connection_string}"
-                    )]
+                    logger.info(f"break_windbg: Auto-creating session for {session_id}")
+                    try:
+                        session = get_or_create_session(
+                            connection_string=args.connection_string,
+                            cdb_path=cdb_path,
+                            symbols_path=symbols_path,
+                            timeout=timeout,
+                            verbose=verbose,
+                            skip_initial_wait=True  # Don't wait for prompt - we're about to break
+                        )
+                    except Exception as e:
+                        return [TextContent(
+                            type="text",
+                            text=f"Failed to connect: {str(e)}"
+                        )]
+                else:
+                    session = active_sessions[session_id]
 
-                session = active_sessions[session_id]
                 try:
                     session.break_execution()
                     return [TextContent(

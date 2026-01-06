@@ -53,7 +53,8 @@ class CDBSession:
         initial_commands: Optional[List[str]] = None,
         timeout: int = 10,
         verbose: bool = False,
-        additional_args: Optional[List[str]] = None
+        additional_args: Optional[List[str]] = None,
+        skip_initial_wait: bool = False
     ):
         """
         Initialize a new CDB debugging session.
@@ -67,6 +68,10 @@ class CDBSession:
             timeout: Timeout in seconds for waiting for CDB responses
             verbose: Whether to print additional debug information
             additional_args: Additional arguments to pass to cdb.exe
+            skip_initial_wait: If True, don't wait for CDB prompt during initialization.
+                               Useful for connecting to running targets where the prompt
+                               won't appear until the target breaks. Output will still
+                               accumulate in the buffer for later retrieval.
 
         Raises:
             CDBError: If cdb.exe cannot be found or started
@@ -142,29 +147,36 @@ class CDBSession:
         self.reader_thread.daemon = True
         self.reader_thread.start()
 
-        # Wait for CDB to initialize by sending an echo marker
-        # For remote connections, use a longer timeout since there can be
-        # extensive symbol path validation output
-        init_timeout = self.timeout
-        if self.remote_connection:
-            # Remote connections can take much longer due to symbol validation
-            init_timeout = max(self.timeout, 60)
-            logger.info(f"Remote connection detected, using {init_timeout}s init timeout")
+        # If skip_initial_wait is True, don't wait for prompt - useful for running targets
+        if skip_initial_wait:
+            logger.info("Skipping initial wait for prompt (async mode)")
+            # Give a brief moment for CDB to start and begin outputting
+            import time
+            time.sleep(0.5)
+        else:
+            # Wait for CDB to initialize by sending an echo marker
+            # For remote connections, use a longer timeout since there can be
+            # extensive symbol path validation output
+            init_timeout = self.timeout
+            if self.remote_connection:
+                # Remote connections can take much longer due to symbol validation
+                init_timeout = max(self.timeout, 60)
+                logger.info(f"Remote connection detected, using {init_timeout}s init timeout")
 
-        try:
-            self._wait_for_prompt(timeout=init_timeout)
-        except CDBError:
-            self.shutdown()
-            raise CDBError("CDB initialization timed out")
+            try:
+                self._wait_for_prompt(timeout=init_timeout)
+            except CDBError:
+                self.shutdown()
+                raise CDBError("CDB initialization timed out")
 
-        # For remote connections, clear any accumulated output from the connection
-        # process (symbol validation, path errors, etc.) so it doesn't pollute
-        # the first command's output
-        if self.remote_connection:
-            with self.lock:
-                self.recent_output.clear()
-                self.output_lines = []
-            logger.info("Cleared initial remote connection output")
+            # For remote connections, clear any accumulated output from the connection
+            # process (symbol validation, path errors, etc.) so it doesn't pollute
+            # the first command's output
+            if self.remote_connection:
+                with self.lock:
+                    self.recent_output.clear()
+                    self.output_lines = []
+                logger.info("Cleared initial remote connection output")
 
         # Run initial commands if provided
         if initial_commands:
