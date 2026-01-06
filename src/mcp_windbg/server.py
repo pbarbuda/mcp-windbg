@@ -60,14 +60,6 @@ class OpenWindbgDump(BaseModel):
     include_threads: bool = Field(description="Whether to include thread information")
 
 
-class OpenWindbgRemote(BaseModel):
-    """Parameters for connecting to a remote debug session."""
-    connection_string: str = Field(description="Remote connection string (e.g., 'tcp:Port=5005,Server=192.168.0.100')")
-    include_stack_trace: bool = Field(default=False, description="Whether to include stack traces in the analysis")
-    include_modules: bool = Field(default=False, description="Whether to include loaded module information")
-    include_threads: bool = Field(default=False, description="Whether to include thread information")
-
-
 class RunWindbgCmdParams(BaseModel):
     """Parameters for executing a WinDbg command."""
     dump_path: Optional[str] = Field(default=None, description="Path to the Windows crash dump file")
@@ -346,23 +338,24 @@ def _create_server(
                 inputSchema=OpenWindbgDump.model_json_schema(),
             ),
             Tool(
-                name="open_windbg_remote",
-                description="""
-                Connect to a remote debugging session using WinDbg/CDB.
-                This tool establishes a remote debugging connection and allows you to analyze the target process.
-                """,
-                inputSchema=OpenWindbgRemote.model_json_schema(),
-            ),
-            Tool(
                 name="run_windbg_cmd",
                 description="""
                 Execute a specific WinDbg command on a loaded crash dump or remote session.
                 This tool allows you to run any WinDbg command and get the output.
-
+                
+                For remote debugging: Simply provide a connection_string and the session will be
+                created automatically on the first command. No separate 'open' step is needed.
+                Example connection strings:
+                - tcp:Port=5005,Server=192.168.0.100
+                - npipe:Pipe=pipename,Server=hostname
+                
                 For commands like 'g' (go/continue) that don't return until the debugger breaks,
                 set async_mode=true. This will send the command, wait 3 seconds, and return any
                 output captured during that time. Use get_windbg_output to retrieve additional
                 output later, or break_windbg to stop execution.
+                
+                Note: For remote sessions where the target may be running, use async_mode=true
+                for the first command, or use break_windbg first to ensure the target is stopped.
                 """,
                 inputSchema=RunWindbgCmdParams.model_json_schema(),
             ),
@@ -475,40 +468,6 @@ def _create_server(
                     results.append("### Threads\n```\n" + "\n".join(threads) + "\n```\n\n")
 
                 return [TextContent(type="text", text="".join(results))]
-
-            elif name == "open_windbg_remote":
-                args = OpenWindbgRemote(**arguments)
-                session = get_or_create_session(
-                    connection_string=args.connection_string, cdb_path=cdb_path, symbols_path=symbols_path, timeout=timeout, verbose=verbose
-                )
-
-                results = []
-
-                # Get target information for remote debugging
-                target_info = session.send_command("!peb")
-                results.append("### Target Process Information\n```\n" + "\n".join(target_info) + "\n```\n\n")
-
-                # Get current state
-                current_state = session.send_command("r")
-                results.append("### Current Registers\n```\n" + "\n".join(current_state) + "\n```\n\n")
-
-                # Optional
-                if args.include_stack_trace:
-                    stack = session.send_command("kb")
-                    results.append("### Stack Trace\n```\n" + "\n".join(stack) + "\n```\n\n")
-
-                if args.include_modules:
-                    modules = session.send_command("lm")
-                    results.append("### Loaded Modules\n```\n" + "\n".join(modules) + "\n```\n\n")
-
-                if args.include_threads:
-                    threads = session.send_command("~")
-                    results.append("### Threads\n```\n" + "\n".join(threads) + "\n```\n\n")
-
-                return [TextContent(
-                    type="text",
-                    text="".join(results)
-                )]
 
             elif name == "run_windbg_cmd":
                 args = RunWindbgCmdParams(**arguments)
